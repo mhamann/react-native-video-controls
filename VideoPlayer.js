@@ -3,6 +3,7 @@ import Video from 'react-native-video';
 import {
     TouchableWithoutFeedback,
     TouchableHighlight,
+    DeviceEventEmitter,
     ImageBackground,
     PanResponder,
     StyleSheet,
@@ -11,10 +12,16 @@ import {
     Platform,
     Easing,
     Image,
+    Modal,
     View,
     Text
 } from 'react-native';
 import _ from 'lodash';
+import Chromecast from 'react-native-google-cast';
+import {
+    ListItem,
+    List
+} from 'react-native-elements';
 
 export default class VideoPlayer extends Component {
 
@@ -64,6 +71,10 @@ export default class VideoPlayer extends Component {
             currentTime: 0,
             error: false,
             duration: 0,
+            isCasting: false,
+            showCastDisconnectModal: false,
+            showCastModal: false,
+            castDevices: []
         };
 
         /**
@@ -101,6 +112,7 @@ export default class VideoPlayer extends Component {
             togglePlayPause: this._togglePlayPause.bind( this ),
             toggleControls: this._toggleControls.bind( this ),
             toggleTimer: this._toggleTimer.bind( this ),
+            toggleCasting: this._toggleCasting.bind( this ),
         };
 
         /**
@@ -147,6 +159,10 @@ export default class VideoPlayer extends Component {
             videoStyle: this.props.videoStyle || {},
             containerStyle: this.props.style || {}
         };
+
+        if (props.enableCasting) {
+            this._listenForCastEvents();
+        }
     }
 
 
@@ -388,6 +404,11 @@ export default class VideoPlayer extends Component {
      * state then calls the animation.
      */
     _hideControls() {
+        // Don't hide if still loading or casting
+        if (this.state.isCasting || this.state.loading) {
+            return;
+        }
+
         let state = this.state;
         state.showControls = false;
         this.hideControlAnimation();
@@ -401,7 +422,13 @@ export default class VideoPlayer extends Component {
      */
     _toggleControls() {
         let state = this.state;
-        state.showControls = ! state.showControls;
+
+        // Don't hide if still loading or casting
+        if (this.state.isCasting || this.state.loading) {
+            state.showControls = true;
+        } else {
+            state.showControls = ! state.showControls;
+        }
 
         if ( state.showControls ) {
             this.showControlAnimation();
@@ -440,17 +467,88 @@ export default class VideoPlayer extends Component {
     }
 
     /**
+     * Toggle casting will either show
+     * the cast selection dialog
+     * or allow the user to end the
+     * casting session.
+     */
+    _toggleCasting() {
+        let state = Object.assign({}, this.state);
+
+        // Display the cast selection screen
+        if (!state.isCasting) {
+            state.showCastModal = true;
+            Chromecast.startScan();
+        } 
+        // Allow the user to stop casting
+        else {
+            state.showCastDisconnectModal = true;
+        }
+
+        this.setState( state );
+    }
+
+    async _connectToCastDevice(device) {
+        const isConnected = await Chromecast.isConnected();
+        isConnected
+          ? this._castMedia()
+          : Chromecast.connectToDevice(device.id);
+
+        this.setState({
+            castDevice: device
+        });
+    }
+
+    _castMedia() {
+        this.setState({isCasting: true});
+        Chromecast.castMedia(this.props.source.uri, this.props.title, this.props.poster || '', this.state.seekerPosition);
+
+        this.showControlAnimation();
+    }
+
+    /**
+     * Hide any Cast modals that are displayed
+     */
+    _hideCastModal() {
+        this.setState({
+            showCastModal: false,
+            showCastDisconnectModal: false
+        });
+    }
+
+    _listenForCastEvents() {
+        DeviceEventEmitter.addListener(Chromecast.DEVICE_AVAILABLE, async (existance) => {
+            if (existance.device_available) {
+                let castDevices = await Chromecast.getDevices();
+                this.setState({ castDevices });
+            }
+        });
+
+        DeviceEventEmitter.addListener(Chromecast.DEVICE_CONNECTED, () => {
+            this._castMedia();
+        });
+
+        DeviceEventEmitter.addListener(Chromecast.DEVICE_DISCONNECTED, () => {
+            this._togglePlayPause('pause');
+        });
+    }
+
+    /**
      * Toggle playing state on <Video> component
      */
-    _togglePlayPause() {
+    _togglePlayPause(forceState) {
         let state = this.state;
-        state.paused = !state.paused;
+        state.paused = forceState ? forceState === 'pause' : !state.paused;
 
         if (state.paused) {
             typeof this.events.onPause === 'function' && this.events.onPause();
         }
         else {
             typeof this.events.onPlay === 'function' && this.events.onPlay();
+        }
+
+        if (state.isCasting) {
+            Chromecast.togglePauseCast();
         }
 
         this.setState( state );
@@ -854,6 +952,7 @@ export default class VideoPlayer extends Component {
         const backControl = this.props.disableBack ? this.renderNullControl() : this.renderBack();
         const volumeControl = this.props.disableVolume ? this.renderNullControl() : this.renderVolume();
         const fullscreenControl = this.props.disableFullscreen ? this.renderNullControl() : this.renderFullscreen();
+        const castControl = this.props.enableCasting ? this.renderCastControl() : this.renderNullControl();
 
         return(
             <Animated.View style={[
@@ -871,6 +970,7 @@ export default class VideoPlayer extends Component {
                         { backControl }
                         <View style={ styles.controls.pullRight }>
                             { volumeControl }
+                            { castControl }
                             { fullscreenControl }
                         </View>
                     </View>
@@ -932,6 +1032,19 @@ export default class VideoPlayer extends Component {
             <Image source={ source } />,
             this.methods.toggleFullscreen,
             styles.controls.fullscreen
+        );
+    }
+
+    /**
+     * Render cast control and set icon based on the casting state
+     */
+    renderCastControl() {
+        let source = this.state.isCasting === true ? require( './assets/img/cast_connected_white.png' ) : require( './assets/img/cast_white.png' );
+
+        return this.renderControl(
+            <Image source={ source } />,
+            this.methods.toggleCasting,
+            styles.controls.cast
         );
     }
 
@@ -1093,11 +1206,26 @@ export default class VideoPlayer extends Component {
         return null;
     }
 
+    renderCastInfo() {
+        if ( !this.state.isCasting ) { return null; }
+
+        return (
+            <View style={styles.controls.castInfoContainer} pointerEvents='box-none'>
+                <Text style={styles.controls.text}>
+                    Casting on: {this.state.castDevice.name}
+                </Text>
+            </View>
+        )
+    }
+
     /**
      * Provide all of our options and render the whole component.
      */
     render() {
+        let isDevicePaused = this.state.isCasting ? true : this.state.paused;
+
         return (
+            <View style={[ styles.player.container, this.styles.containerStyle ]}>
             <TouchableWithoutFeedback
                 onPress={ this.events.onScreenTouch }
                 style={[ styles.player.container, this.styles.containerStyle ]}
@@ -1109,7 +1237,7 @@ export default class VideoPlayer extends Component {
 
                         resizeMode={ this.state.resizeMode }
                         volume={ this.state.volume }
-                        paused={ this.state.paused }
+                        paused={ isDevicePaused }
                         muted={ this.state.muted }
                         rate={ this.state.rate }
 
@@ -1126,9 +1254,32 @@ export default class VideoPlayer extends Component {
                     { this.renderError() }
                     { this.renderTopControls() }
                     { this.renderLoader() }
+                    { this.renderCastInfo() }
                     { this.renderBottomControls() }
                 </View>
             </TouchableWithoutFeedback>
+            { this.state.showCastModal && 
+                <Modal
+                    animationType="slide"
+                    transparent={true}
+                    visible={true}
+                    onRequestClose={this._hideCastModal.bind(this)}
+                >
+                    <List>
+                        {this.state.castDevices.map((item, i) => {
+                            return <ListItem
+                                key={i}
+                                title={item.name}
+                                onPress={() => {
+                                    this._connectToCastDevice(item);
+                                    this._hideCastModal();
+                                }}
+                            />
+                        })}
+                    </List>
+                </Modal>
+            }
+            </View>
         );
     }
 }
@@ -1272,6 +1423,15 @@ const styles = {
             color: '#FFF',
             fontSize: 11,
             textAlign: 'right',
+        },
+        castInfoContainer: {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            bottom: 0,
+            right: 0,
+            justifyContent: 'center',
+            alignItems: 'center'
         },
     }),
     volume: StyleSheet.create({
