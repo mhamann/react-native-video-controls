@@ -23,6 +23,11 @@ import {
     List
 } from 'react-native-elements';
 
+const CAST_PLAYER_STATE_IDLE = 1;
+const CAST_PLAYER_STATE_PLAYING = 2;
+const CAST_PLAYER_STATE_PAUSED = 3;
+const CAST_PLAYER_STATE_BUFFERING = 4;
+
 export default class VideoPlayer extends Component {
 
     static defaultProps = {
@@ -199,7 +204,7 @@ export default class VideoPlayer extends Component {
      *
      * @param {object} data The video meta data
      */
-    _onLoad( data = {} ) {
+    async _onLoad( data = {} ) {
         let state = this.state;
 
         state.duration = data.duration;
@@ -212,6 +217,11 @@ export default class VideoPlayer extends Component {
 
         if ( typeof this.props.onLoad === 'function' ) {
             this.props.onLoad(...arguments);
+        }
+
+        let castState = await GoogleCast.getCastState();
+        if (castState === 'Connected') {
+            //this._castMedia();
         }
     }
 
@@ -472,40 +482,47 @@ export default class VideoPlayer extends Component {
             mediaUrl: this.props.source.uri,
             imageUrl: this.props.poster || '',
             title: this.props.metadata.title || '',
-            subtitle: this.props.metadata.subtitle || ''
-            //playPosition: this.state.seekerPosition
+            subtitle: this.props.metadata.subtitle || '',
+            playPosition: this.state.seekerPosition
         };
 
         // TODO: If not a live stream...
         //castOptions.playPosition = this.state.seekerPosition;
 
+        //GoogleCast.stop();
         GoogleCast.castMedia(castOptions);
 
         let castState = await GoogleCast.getCastState();
         console.warn(castState);
 
         this.showControlAnimation();
+        //GoogleCast.launchExpandedControls();
+    }
+
+    _updatePlayerStatus = (mediaStatus) => {
+        console.warn(mediaStatus);
+        this.setSeekerPosition(mediaStatus.streamPosition);
+
+        if (mediaStatus.playerState === CAST_PLAYER_STATE_PAUSED) {
+            this.methods.togglePlayPause('pause');
+        } else if (mediaStatus.playerState === CAST_PLAYER_STATE_PLAYING) {
+            this.methods.togglePlayPause('play');
+        }
     }
 
     _listenForCastEvents() {
         GoogleCast.EventEmitter.addListener(GoogleCast.SESSION_STARTED, () => { 
             this._castMedia();
-         });
-
-        /*DeviceEventEmitter.addListener(Chromecast.DEVICE_AVAILABLE, async (existance) => {
-            if (existance.device_available) {
-                let castDevices = await Chromecast.getDevices();
-                this.setState({ castDevices });
-            }
         });
 
-        DeviceEventEmitter.addListener(Chromecast.DEVICE_CONNECTED, () => {
+        GoogleCast.EventEmitter.addListener(GoogleCast.MEDIA_STATUS_UPDATED, ({mediaStatus}) => {
+            this._updatePlayerStatus(mediaStatus);
+        });
+
+        GoogleCast.EventEmitter.addListener(GoogleCast.SESSION_RESUMED, () => {
+            console.warn('Session resumed!');
             this._castMedia();
         });
-
-        DeviceEventEmitter.addListener(Chromecast.DEVICE_DISCONNECTED, () => {
-            this._togglePlayPause('pause');
-        });*/
     }
 
     /**
@@ -896,7 +913,7 @@ export default class VideoPlayer extends Component {
      * consistent <TouchableHighlight>
      * wrapper and styling.
      */
-    renderControl( children, callback, style = {} ) {
+    renderControl( children, callback, style = {}, viewOpts = {} ) {
         return (
             <TouchableHighlight
                 underlayColor="transparent"
@@ -909,6 +926,7 @@ export default class VideoPlayer extends Component {
                     styles.controls.control,
                     style
                 ]}
+                {...viewOpts}
             >
                 { children }
             </TouchableHighlight>
@@ -1021,7 +1039,11 @@ export default class VideoPlayer extends Component {
      */
     renderCastControl() {
         return (
-            <CastButton style={{ width: 24, height: 24, zIndex: 100 }} tintColor='white' />
+            <TouchableHighlight style={{ width: 24, height: 24}} onPress={() => {
+                this.castButtonRef.click();
+            }}>
+                <CastButton style={{ width: 24, height: 24 }} hitSlop={{top: 12, bottom: 12, left: 0, right: 0}} tintColor='white' ref={el => this.castButtonRef = el} />
+            </TouchableHighlight>
         );
     }
 
@@ -1086,6 +1108,7 @@ export default class VideoPlayer extends Component {
                         { left: this.state.seekerPosition }
                     ]}
                     { ...this.player.seekPanResponder.panHandlers }
+                    hitSlop={{top: 20, bottom: 12, left: 0, right: 0}}
                 >
                     <View style={[
                         styles.seekbar.circle,
@@ -1105,7 +1128,8 @@ export default class VideoPlayer extends Component {
         return this.renderControl(
             <Image source={ source } />,
             this.methods.togglePlayPause,
-            styles.controls.playPause
+            styles.controls.playPause,
+            { hitSlop: {top: 0, bottom: 12, left: 0, right: 0} }
         );
     }
 
